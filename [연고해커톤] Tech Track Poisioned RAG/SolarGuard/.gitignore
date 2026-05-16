@@ -1,0 +1,8 @@
+.venv/
+parsed_corpus/
+__pycache__/
+.DS_Store
+.env
+submission*.csv
+scripts/
+distribution/

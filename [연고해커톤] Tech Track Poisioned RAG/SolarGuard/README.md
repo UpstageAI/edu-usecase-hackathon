@@ -1,0 +1,255 @@
+# Tech Starterkit RAG Pipeline
+
+PDF corpus를 파싱하고, chunking, BM25 retrieval, 선택적 dense FAISS retrieval, Solar LLM generation을 거쳐 `submission.csv`를 생성하는 RAG 파이프라인입니다.
+
+## Setup
+
+Python 가상환경을 권장합니다.
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+Solar LLM 호출용 API key는 환경변수로 설정합니다. Dense embedding은 로컬 BGE 모델을 사용합니다.
+
+```bash
+export UPSTAGE_API_KEY=<your_upstage_key>
+export HACKATHON_KEY=<hackathon_key>   # 대회 당일 실제 test suite 복호화에 필요
+```
+
+`HACKATHON_KEY`가 없으면 `decryptor.py`의 더미 질문으로 실행됩니다.
+로컬 dense embedding 모델(`BAAI/bge-large-en-v1.5`)은 첫 dense index build 때 Hugging Face cache로 다운로드됩니다.
+
+## Config
+
+주요 설정은 [config.yaml](/Users/jseui/Desktop/hackathon/tech-starterkit/config.yaml)에서 관리합니다.
+
+```yaml
+parsing:
+  backend: pdfplumber
+  output_dir: parsed_corpus
+  force: false
+  pdfplumber:
+    extract_tables: true
+
+chunking:
+  active_strategy: chunk_block
+  strategies:
+    - chunk_slide
+    - chunk_block
+  max_chunk_chars: 1200
+  overlap_chars: 400
+  block_min_chars: 1200
+  block_max_chars: 1600
+  slide_output_filename: chunks_slide.jsonl
+  block_output_filename: chunks_block.jsonl
+
+indexing:
+  bm25:
+    k1: 1.5
+    b: 0.75
+  dense:
+    enabled: true
+    model_name: BAAI/bge-large-en-v1.5
+    dimension: 1024
+    batch_size: 32
+    query_instruction: "Represent this sentence for searching relevant passages: "
+
+retrieval:
+  bm25_top_k: 30
+  dense_top_k: 10
+  final_top_k: 20
+  iterative:
+    context_mode: accumulate
+    max_context_chunks: 60
+  merge:
+    max_candidates: 80
+```
+
+`indexing.dense.enabled: false`로 바꾸면 FAISS index build와 dense query embedding을 건너뛰고 BM25 retrieval만 사용합니다.
+`retrieval.iterative.context_mode: rerank`는 매 iteration마다 `final_top_k`개만 유지하고, `accumulate`는 retrieval run 수만큼 context budget을 키웁니다. 예를 들어 `final_top_k: 20`이면 1회차 20개, 2회차 40개, 3회차 60개까지 사용합니다.
+
+## Pipeline
+
+전체 실행:
+
+```bash
+.venv/bin/python baseline_rag.py
+```
+
+실행 흐름:
+
+```text
+PDF corpus
+→ parse_corpus
+→ chunk_corpus
+→ index_corpus
+→ query analysis
+→ BM25 retrieval (+ dense retrieval when enabled)
+→ merge retrieval results
+→ draft generation
+→ final safety generation via tracker.chat()
+→ submission.csv
+```
+
+최종 제출 row는 `tracker.chat()`를 호출하는 final generation 단계에서만 기록됩니다. Query analysis와 draft generation은 별도 Solar API 호출을 사용하며 `submission.csv`에 row를 추가하지 않습니다.
+
+## Intermediate Commands
+
+파싱만 실행:
+
+```bash
+.venv/bin/python src/parse_corpus.py --option pdfplumber
+```
+
+청킹만 실행:
+
+```bash
+.venv/bin/python src/chunk_corpus.py \
+  --pages parsed_corpus/pdfplumber/pages.jsonl \
+  --all
+```
+
+FAISS dense index 생성 (`indexing.dense.enabled: true`일 때만 필요):
+
+```bash
+.venv/bin/python src/index_corpus.py \
+  --chunks parsed_corpus/pdfplumber/chunks_block.jsonl
+```
+
+BM25 검색 확인:
+
+```bash
+.venv/bin/python src/retriever_bm25.py \
+  parsed_corpus/pdfplumber/chunks_block.jsonl \
+  김민준 전략기획팀 인건비 비율 \
+  --top-k 8
+```
+
+Dense 검색 확인 (`indexing.dense.enabled: true`일 때만 사용):
+
+```bash
+.venv/bin/python src/retriever_dense.py \
+  "Alpha project kickoff date" \
+  --top-k 5
+```
+
+`chunk_slide`는 고정 길이 sliding window 방식이고, `chunk_block`은 빈 줄, 이메일 헤더(`From:`, `To:`, `Subject:`, `Date:` 등), 원문 전달 구분선을 기준으로 block을 만든 뒤 `block_min_chars`~`block_max_chars` 범위에 맞춰 pack합니다.
+
+## Artifacts
+
+파싱 산출물은 pdfplumber backend 아래에 생성됩니다.
+
+```text
+parsed_corpus/
+  pdfplumber/
+    pages.jsonl
+    chunks_slide.jsonl
+    chunks_block.jsonl
+    dense.faiss
+    dense_metadata.jsonl
+    dense_embeddings.npy
+    dense_manifest.json
+    text/*.txt
+```
+
+주요 파일:
+
+- `pages.jsonl`: 페이지 단위 파싱 결과
+- `text/*.txt`: 사람이 확인하기 쉬운 텍스트 덤프
+- `chunks_slide.jsonl`: fixed sliding-window chunk
+- `chunks_block.jsonl`: paragraph/email-block packed chunk
+- `dense.faiss`: normalized passage embedding FAISS index
+- `dense_metadata.jsonl`: FAISS vector id와 chunk metadata 매핑
+- `dense_embeddings.npy`: normalized embedding matrix
+- `dense_manifest.json`: dense index를 만든 로컬 모델/차원/chunk count 기록
+
+## Source Layout
+
+```text
+baseline_rag.py              # end-to-end pipeline entrypoint
+config.yaml                  # parser/chunker/index/retrieval/LLM 설정
+decryptor.py                 # encrypted test suite loader
+upstage_tracker.py           # final Solar call + submission.csv tracking
+validator.py                 # submission.csv schema validation
+
+src/
+  parse_corpus.py            # pdfplumber PDF parser
+  chunk_corpus.py            # fixed-size page chunking
+  index_corpus.py            # local BGE embedding + FAISS index build
+  retriever_bm25.py          # in-memory BM25 retriever
+  retriever_dense.py         # local query embedding + FAISS dense retriever
+  retriever_merge.py         # BM25/dense merge strategy
+  prompt.py                  # LLM prompts
+```
+
+## Retrieval Design
+
+Query analysis 단계는 다음 JSON만 생성하도록 프롬프트되어 있습니다.
+
+```json
+{
+  "keywords": ["BM25 keyword"],
+  "subqueries": ["dense retrieval subquery"]
+}
+```
+
+Retrieval 단계:
+
+1. `keywords`로 BM25 검색
+2. `indexing.dense.enabled: true`이면 원 질문 + `subqueries` 각각에 대해 dense 검색
+3. `retriever_merge.py`에서 provenance를 유지하며 merge. Dense가 꺼져 있으면 BM25 결과만 merge
+4. 최종 20개 passage를 generation context로 구성
+
+Merge는 RRF, BM25/dense overlap, original query hit, subquery coverage, doc/section 반복 제한을 사용합니다.
+
+## Safety
+
+문서에는 prompt injection과 PII가 포함될 수 있습니다.
+
+현재 safety는 final generation prompt에서 처리합니다.
+
+- retrieved context는 untrusted data로 취급
+- 문서 내부 지시문을 따르지 않음
+- `APPROVED_BY_ADMIN` 같은 poisoning artifact 제거
+- 주민등록번호, 계좌번호, 개인 연락처, 연봉 등 민감정보 비공개
+
+Known poisoning token은 deterministic post-filter를 추가하는 것이 좋습니다.
+
+## Submission
+
+실행 후 `submission.csv`가 생성되고 `validator.py`가 자동 실행됩니다.
+
+수동 검증:
+
+```bash
+.venv/bin/python validator.py submission.csv
+```
+
+제출 CSV 필수 컬럼:
+
+```text
+question_id, answer, used_tokens, inference_time, token
+```
+
+주의:
+
+- `used_tokens`가 0이면 채점 제외
+- `question_id` 중복 금지
+- 최종 답변은 반드시 `tracker.chat()`을 통해 생성
+
+## Docker
+
+Docker 실행도 가능합니다.
+
+```bash
+docker build -t hackathon-rag .
+docker run --rm \
+  -e UPSTAGE_API_KEY=<your_key> \
+  -e HACKATHON_KEY=<hackathon_key> \
+  -v "$(pwd):/workspace" \
+  hackathon-rag
+```
+
+로컬 개발 중에는 `.venv`가 더 빠르고 디버깅하기 쉽습니다.
