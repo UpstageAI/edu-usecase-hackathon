@@ -1,0 +1,25 @@
+# ── 필수 패키지 (반드시 설치) ───────────────────────────────────────────
+pandas>=2.0.0          # submission.csv 생성 및 검증 (validator, upstage_tracker)
+cryptography>=42.0.0   # AES-256-GCM 복호화 (decryptor.py)
+numpy>=1.26.0          # 임베딩 행렬 연산 (upstage_client, baseline_rag)
+pypdf>=4.0.0           # PDF 페이지 분할 (Document Parse 호출 단위 ~80p)
+
+# ── PDF 파싱 보조 (선택) ─────────────────────────────────────────────────
+# pdfplumber>=0.10.0    # 표·레이아웃 추출에 강함
+
+# ── Vector DB (하나 선택) ────────────────────────────────────────────────
+# chromadb>=0.4.0
+# faiss-cpu>=1.7.4
+# pinecone-client>=3.0.0
+
+# ── 검색 및 임베딩 ───────────────────────────────────────────────────────
+# scikit-learn>=1.4.0   # TF-IDF 기반 검색 (임베딩 없이 간단 구현 시)
+# numpy>=1.26.0
+
+# ── RAG 프레임워크 (선택) ────────────────────────────────────────────────
+# langchain>=0.2.0
+# llama-index>=0.10.0
+
+# ── LLM API (Upstage 외 다른 API 사용 시) ───────────────────────────────
+# openai>=1.0.0         # OpenAI / Upstage Solar (OpenAI 호환)
+# anthropic>=0.25.0     # Anthropic Claude
